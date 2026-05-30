@@ -1,0 +1,610 @@
+% =============================================================
+%  CHAPTER 9: API DOCUMENTATION
+%  Assignee Roll Number: 2105039
+% =============================================================
+
+\chapter{API Documentation}
+
+\assignee{2105039}
+
+
+% -------------------------------------------------------------
+\section{Presenter Information}
+% -------------------------------------------------------------
+\presenter{Mohi Uddin Sizan}{2105057}{April 5,2026}
+
+% -------------------------------------------------------------
+\section{Changes Made Based on Feedback}
+% -------------------------------------------------------------
+\feedback
+{1. Fixed \texttt{POST /auth/register}: registration role is now restricted to \texttt{CUSTOMER} and \texttt{RIDER} only.}
+{2. Fixed \texttt{POST /orders/\{orderId\}/status}: allowed values now include only rider transition statuses, not every \texttt{OrderStatus}.}
+{3. Fixed rider location APIs: removed client-supplied \texttt{riderId} from \texttt{/rider/location} and \texttt{/rider/location/batch}; rider identity is derived from JWT.}
+
+% -------------------------------------------------------------
+\section{API Scope and Architecture Overview}
+% -------------------------------------------------------------
+
+This chapter documents the REST API for the Pathao Parcel Delivery Management
+System. The API supports complete parcel operations from account creation,
+order placement, rider dispatch, live tracking, payment handling, and delivery
+verification to platform-level analytics. The documentation is based on an
+OpenAPI 3.0.3 specification and follows a consistent response envelope and
+JWT-based authorization model.
+
+\begin{tcolorbox}[
+		enhanced,
+		colback=InfoBlue!6,
+		colframe=InfoBlue,
+		arc=5pt,
+		boxrule=1pt,
+		left=10pt, right=10pt, top=7pt, bottom=7pt,
+		title={\bfseries API At a Glance},
+		fonttitle=\bfseries\color{white},
+		colbacktitle=InfoBlue
+]
+\begin{tabular}{@{}p{4.2cm}p{9.4cm}@{}}
+\textbf{Specification} & OpenAPI 3.0.3 \\
+\textbf{Version} & 1.0.0 \\
+\textbf{Base Path} & \texttt{/api/v1} \\
+\textbf{Auth} & Bearer JWT on all protected endpoints \\
+\textbf{Roles} & \texttt{CUSTOMER}, \texttt{RIDER}, \texttt{ADMIN}, \texttt{DISPATCHER} \\
+\textbf{Important Modules} & Auth, Orders, Dispatch, Rider, Tracking, Payments, Verification \\
+\textbf{Secondary Modules} & Me, Users, Geo, SMS, Admin Analytics \\
+\textbf{Primary Goal} & Reliable and auditable parcel lifecycle management \\
+\end{tabular}
+\end{tcolorbox}
+
+\subsection{Design Principles}
+
+The API design follows the principles below:
+\begin{itemize}
+		\item \textbf{Role-aware access control:} every endpoint serves a specific actor,
+					and server-side role checks enforce authorization boundaries.
+		\item \textbf{Predictable request/response shape:} all responses follow one
+					envelope, reducing frontend integration complexity.
+		\item \textbf{Operational safety:} idempotency headers, explicit status machines,
+					and webhook acknowledgments reduce duplicate writes and race conditions.
+		\item \textbf{Traceability:} timeline events, GPS history, OTP/proof records,
+					and analytics endpoints support audit and monitoring requirements.
+\end{itemize}
+
+\subsection{Environments and Base URLs}
+
+\begin{tcolorbox}[
+		enhanced,
+		colback=LightGray,
+		colframe=PrimaryBlue,
+		arc=4pt,
+		boxrule=0.8pt,
+		left=10pt, right=10pt, top=6pt, bottom=6pt
+]
+\begin{tabularx}{\textwidth}{@{}p{3.2cm}p{4.8cm}X@{}}
+\toprule
+\textbf{Environment} & \textbf{Base URL} & \textbf{Usage} \\
+\midrule
+Local Development & \texttt{http://localhost:4000/api/v1} & Developer testing with local database and service mocks. \\
+Production & \texttt{https://api.example.com/api/v1} & Real traffic, strict logging, monitoring, and role restrictions. \\
+\bottomrule
+\end{tabularx}
+\end{tcolorbox}
+
+% -------------------------------------------------------------
+\section{Global API Conventions}
+% -------------------------------------------------------------
+
+\subsection{Standard Response Envelope}
+
+All endpoints return a unified payload with four top-level fields:
+\texttt{success}, \texttt{data}, \texttt{error}, and \texttt{meta}. This
+uniform structure helps frontend pages handle success, validation errors,
+pagination, and operational metadata with one reusable parser.
+
+\begin{lstlisting}[caption={Unified success response format}]
+{
+	"success": true,
+	"data": { "id": "ord_01HY..." },
+	"error": null,
+	"meta": {
+		"requestId": "req_12abc",
+		"page": 1,
+		"limit": 20,
+		"total": 145,
+		"hasNext": true
+	}
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Unified error response format}]
+{
+	"success": false,
+	"data": null,
+	"error": {
+		"code": "VALIDATION_ERROR",
+		"message": "Invalid payload",
+		"details": [
+			{ "field": "pickup.location.lat", "issue": "Must be between -90 and 90" }
+		]
+	},
+	"meta": null
+}
+\end{lstlisting}
+
+\subsection{Cross-cutting Request Conventions}
+
+\begin{itemize}
+		\item \textbf{Pagination:} \texttt{page} and \texttt{limit} are used for list endpoints.
+		\item \textbf{Sorting:} many lists support \texttt{sort} with format
+					\texttt{field:direction} (example: \texttt{createdAt:desc}).
+		\item \textbf{Idempotency:} write endpoints that may be retried accept
+					\texttt{Idempotency-Key} to prevent duplicate operations.
+		\item \textbf{HTTP semantics:}
+					\texttt{GET} for read, \texttt{POST} for create/action,
+					\texttt{PATCH} for partial update, \texttt{DELETE} for cancellation/removal.
+\end{itemize}
+
+% -------------------------------------------------------------
+\section{Authentication and Authorization (Detailed)}
+% -------------------------------------------------------------
+
+Authentication is handled using JWT access and refresh tokens.
+Authorization is role-based and enforced in each protected route.
+
+\subsection{Authentication Endpoints}
+
+\begin{tabularx}{\textwidth}{@{}p{2.5cm}p{4.4cm}X@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Purpose} \\
+\midrule
+POST & \texttt{/auth/register} & Create a new account (self-registration only for \texttt{CUSTOMER} or \texttt{RIDER}). \\
+POST & \texttt{/auth/login} & Authenticate using phone/email and password; returns user and JWT tokens. \\
+POST & \texttt{/auth/refresh} & Issue new access token using a valid refresh token. \\
+POST & \texttt{/auth/logout} & Invalidate refresh token and end user session. \\
+POST & \texttt{/auth/forgot-password} & Request reset OTP via SMS. \\
+POST & \texttt{/auth/reset-password} & Reset password using OTP and new password. \\
+POST & \texttt{/auth/change-password} & Change current password for authenticated user. \\
+\bottomrule
+\end{tabularx}
+
+\subsection{Token Lifecycle}
+
+\begin{enumerate}
+		\item User submits credentials at \texttt{/auth/login}.
+		\item Server validates credentials and returns \texttt{accessToken} and
+					\texttt{refreshToken}.
+		\item Client sends \texttt{Authorization: Bearer <accessToken>} in protected API calls.
+		\item When access token expires, client calls \texttt{/auth/refresh}.
+		\item Server returns new token pair (or denies if refresh token is invalid).
+		\item Logout revokes refresh token to prevent silent re-authentication.
+\end{enumerate}
+
+\subsection{Authorization Model by Role}
+
+\begin{tcolorbox}[
+		enhanced,
+		colback=AccentGold!8,
+		colframe=AccentGold,
+		arc=4pt,
+		boxrule=0.8pt,
+		left=10pt, right=10pt, top=6pt, bottom=6pt
+]
+\begin{tabularx}{\textwidth}{@{}p{2.6cm}X@{}}
+\toprule
+\textbf{Role} & \textbf{Primary Permissions} \\
+\midrule
+CUSTOMER & Create and manage own orders, track parcels, use OTP and payment endpoints. \\
+RIDER & Accept/decline offers, update delivery status, push location, collect COD, upload proof. \\
+DISPATCHER & Search available riders, assign/unassign riders, monitor operations. \\
+ADMIN & Full user and platform management, analytics, template and zone administration. \\
+\bottomrule
+\end{tabularx}
+\end{tcolorbox}
+
+\subsection{Sample Login Contract}
+
+\begin{lstlisting}[caption={Request/response example for authentication}]
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{
+	"identifier": "+8801XXXXXXXXX",
+	"password": "secret123"
+}
+
+200 OK
+{
+	"success": true,
+	"data": {
+		"user": { "id": "usr_01HY...", "role": "CUSTOMER", "status": "ACTIVE" },
+		"tokens": {
+			"accessToken": "eyJhbGciOi...",
+			"refreshToken": "eyJhbGciOi...",
+			"expiresIn": 3600
+		}
+	},
+	"error": null,
+	"meta": null
+}
+\end{lstlisting}
+
+% -------------------------------------------------------------
+\section{Core Domain Data Model}
+% -------------------------------------------------------------
+
+The domain model is designed to support high-frequency logistics operations
+while preserving auditability and payment correctness.
+
+\begin{tabularx}{\textwidth}{@{}p{2.8cm}X@{}}
+\toprule
+\textbf{Entity} & \textbf{Key Fields and Purpose} \\
+\midrule
+User & Identity, role, status, contact info, lifecycle timestamps. \\
+Order & Customer/rider linkage, pickup and dropoff addresses, parcel detail, pricing, payment, verification state. \\
+Rider & Vehicle profile, online flag, last known location, rating. \\
+RiderOffer & Offer status with expiration window for assignment race handling. \\
+Zone & Polygon-based service region for dispatch and pricing rules. \\
+SmsTemplate & Operational templates for status notifications and reminders. \\
+Money & Currency and minor-unit amount representation for precision-safe calculations. \\
+GeoPoint & WGS84 latitude/longitude for routing and tracking flows. \\
+\bottomrule
+\end{tabularx}
+
+\vspace{6pt}
+\noindent\textbf{Important enum families:}
+\begin{itemize}
+		\item Delivery lifecycle: \texttt{OrderStatus}
+		\item Payment lifecycle: \texttt{PaymentStatus}
+		\item Delivery mode: \texttt{DeliveryType}, \texttt{ParcelSize}
+		\item Verification path: \texttt{OTPPurpose}, \texttt{ProofType}
+\end{itemize}
+
+% -------------------------------------------------------------
+\section{Critical Module Documentation (Detailed)}
+% -------------------------------------------------------------
+
+This section focuses on the most operationally important modules.
+
+\subsection{Orders Module}
+
+The Orders module is the central business workflow. It governs quote generation,
+order creation, updates, cancellation, status transitions, and downstream
+dependencies (dispatch, tracking, payment, notifications).
+
+\subsubsection{Primary Endpoints}
+
+\begin{tabularx}{\textwidth}{@{}p{2.2cm}p{4.4cm}X@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Business Function} \\
+\midrule
+POST & \texttt{/orders/quote} & Pre-compute distance, ETA, and price using route and pricing rules. \\
+POST & \texttt{/orders} & Create order with pickup/dropoff/parcel/payment details. \\
+GET & \texttt{/orders} & List orders by role with filtering, search, and date window. \\
+GET & \texttt{/orders/\{orderId\}} & Retrieve complete order detail including payment and verification fields. \\
+PATCH & \texttt{/orders/\{orderId\}} & Edit mutable fields before assignment stage. \\
+DELETE & \texttt{/orders/\{orderId\}} & Cancel order based on role and stage permissions. \\
+POST & \texttt{/orders/\{orderId\}/status} & Rider-driven operational status update with controlled transitions. \\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{State Transition Logic}
+
+\begin{tcolorbox}[
+		enhanced,
+		colback=SuccessGreen!7,
+		colframe=SuccessGreen,
+		arc=4pt,
+		boxrule=0.8pt,
+		left=10pt, right=10pt, top=7pt, bottom=7pt,
+		title={\bfseries Rider State Machine (Operational Flow)},
+		fonttitle=\bfseries\color{white},
+		colbacktitle=SuccessGreen
+]
+\texttt{ASSIGNED -> RIDER\_EN\_ROUTE\_TO\_PICKUP -> ARRIVED\_AT\_PICKUP -> PICKED\_UP}\newline
+\texttt{-> IN\_TRANSIT -> ARRIVED\_AT\_DROPOFF -> DELIVERED | DELIVERY\_FAILED}
+\end{tcolorbox}
+
+\subsubsection{Important Validation Rules}
+
+\begin{itemize}
+		\item \textbf{Quote lock:} if \texttt{quoteId} is valid at order creation,
+					pricing is locked.
+		\item \textbf{COD enforcement:} COD orders require \texttt{codAmount}.
+		\item \textbf{Edit window:} pickup/dropoff/parcel edits are allowed only in
+					early statuses (before active handoff progression).
+		\item \textbf{Cancellation policy:} customer cancellation is restricted after pickup,
+					while admin retains broader override ability.
+\end{itemize}
+
+\subsubsection{Order Creation Example}
+
+\begin{lstlisting}[caption={Simplified order creation request}]
+POST /api/v1/orders
+Idempotency-Key: f63f2eb5-09f1-4d18-b5d9-8ad7f4f3b8f8
+Authorization: Bearer <access-token>
+
+{
+	"deliveryType": "STANDARD",
+	"parcel": { "size": "MEDIUM", "weightKg": 2.5, "fragile": false },
+	"pickup": {
+		"contactName": "Sender Name",
+		"phone": "+8801XXXX111",
+		"line1": "House 12, Road 3",
+		"city": "Dhaka",
+		"location": { "lat": 23.810331, "lng": 90.412521 }
+	},
+	"dropoff": {
+		"contactName": "Receiver Name",
+		"phone": "+8801XXXX222",
+		"line1": "Shop 5, Road 10",
+		"city": "Dhaka",
+		"location": { "lat": 23.780887, "lng": 90.416578 }
+	},
+	"paymentMethod": "COD",
+	"codAmount": { "currency": "BDT", "amount": 150000 }
+}
+\end{lstlisting}
+
+\subsection{Dispatch and Offer Management}
+
+Dispatch determines how quickly a newly created order is converted into
+an assigned delivery job. It supports both automated geo-search and
+manual dispatcher override.
+
+\subsubsection{Primary Endpoints}
+
+\begin{tabularx}{\textwidth}{@{}p{2.2cm}p{4.8cm}X@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Operational Role} \\
+\midrule
+POST & \texttt{/dispatch/search} & Run automated rider search by radius and filters. \\
+POST & \texttt{/dispatch/assign} & Manual rider assignment when intervention is needed. \\
+POST & \texttt{/dispatch/unassign} & Remove current rider and re-queue search. \\
+GET & \texttt{/offers} & List offers (rider-scoped or admin global view). \\
+POST & \texttt{/offers/\{offerId\}/accept} & Rider accepts offer; competing offers are canceled. \\
+POST & \texttt{/offers/\{offerId\}/decline} & Rider declines with optional reason. \\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{Dispatch Pipeline Notes}
+
+\begin{enumerate}
+		\item Identify online riders near pickup using geospatial index.
+		\item Apply filters (vehicle, rating, exclusion list).
+		\item Sort by proximity.
+		\item Issue offers with TTL window.
+		\item On first valid accept, assign rider and cancel others.
+\end{enumerate}
+
+This flow minimizes assignment delay while preserving dispatcher control in
+exception scenarios.
+
+\subsection{Rider Operations and Tracking}
+
+Rider APIs cover profile state, online availability, active order retrieval,
+GPS ingestion, and event/history tracking.
+
+\subsubsection{High-priority Endpoints}
+
+\begin{tabularx}{\textwidth}{@{}p{2.2cm}p{4.8cm}X@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Purpose} \\
+\midrule
+GET & \texttt{/rider/\{riderId\}} & Rider profile and latest known position. \\
+PATCH & \texttt{/rider/\{riderId\}/availability} & Online/offline toggle for dispatch eligibility. \\
+GET & \texttt{/rider/\{riderId\}/active-order} & Retrieve current assigned job snapshot. \\
+POST & \texttt{/rider/location} & Ingest one GPS point for near-real-time tracking. \\
+POST & \texttt{/rider/location/batch} & Ingest multiple points for offline sync recovery. \\
+GET & \texttt{/orders/\{orderId\}/events} & Timeline events for authenticated stakeholders. \\
+GET & \texttt{/orders/\{orderId\}/location-history} & Full location history (admin/dispatcher). \\
+GET & \texttt{/public/track/\{code\}} & Public snapshot without authentication. \\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{Tracking Security Correction}
+
+The rider location endpoints no longer accept \texttt{riderId} from clients.
+Identity is now resolved from the authenticated JWT. This prevents one rider
+from spoofing location updates for another rider by sending a forged ID.
+
+\subsection{Payments Module}
+
+Payments are implemented for both prepaid gateway transactions and cash-on-delivery.
+The API supports transaction initialization, status checks, webhook handling,
+and COD reconciliation.
+
+\subsubsection{Primary Endpoints}
+
+\begin{tabularx}{\textwidth}{@{}p{2.2cm}p{5.2cm}X@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Purpose} \\
+\midrule
+POST & \texttt{/orders/\{orderId\}/payments/prepaid/init} & Create payment session and return redirect URL. \\
+GET & \texttt{/orders/\{orderId\}/payments/prepaid/status} & Query current prepaid state for order. \\
+POST & \texttt{/payments/prepaid/webhook} & Gateway callback (HMAC verified) for payment finalization. \\
+POST & \texttt{/orders/\{orderId\}/payments/cod/collect} & Rider records COD collection amount and note. \\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{COD Reconciliation Rule}
+
+\begin{itemize}
+		\item collected == expected \Rightarrow \texttt{COD\_COLLECTED}
+		\item collected  < expected \Rightarrow \texttt{COD\_UNDERPAID}
+		\item collected  > expected \Rightarrow \texttt{COD\_OVERPAID}
+\end{itemize}
+
+This explicit state mapping makes cash discrepancy detection and downstream
+finance reconciliation straightforward.
+
+\subsection{Verification and Proof of Delivery}
+
+Verification endpoints add trust at handoff points and are critical for
+dispute reduction.
+
+\subsubsection{Primary Endpoints}
+
+\begin{tabularx}{\textwidth}{@{}p{2.2cm}p{4.8cm}X@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Purpose} \\
+\midrule
+POST & \texttt{/verification/otp/send} & Send OTP for login/pickup/dropoff use-cases. \\
+POST & \texttt{/verification/otp/verify} & Verify OTP with purpose and optional order context. \\
+POST & \texttt{/orders/\{orderId\}/proof} & Upload proof artifact (photo/signature). \\
+GET & \texttt{/orders/\{orderId\}/proof} & Retrieve all proof records for an order. \\
+\bottomrule
+\end{tabularx}
+
+\begin{tcolorbox}[
+		enhanced,
+		colback=WarnOrange!8,
+		colframe=WarnOrange,
+		arc=4pt,
+		boxrule=0.8pt,
+		left=10pt, right=10pt, top=6pt, bottom=6pt,
+		title={\bfseries Verification Policy Notes},
+		fonttitle=\bfseries\color{white},
+		colbacktitle=WarnOrange
+]
+\begin{itemize}
+		\item OTP purpose must match operation context.
+		\item Dropoff OTP should be short-lived and single-use.
+		\item Proof URLs should point to immutable storage objects with audit metadata.
+\end{itemize}
+\end{tcolorbox}
+
+% -------------------------------------------------------------
+\section{Secondary Module Coverage (Brief)}
+% -------------------------------------------------------------
+
+The following modules are essential but less critical for core parcel movement.
+They are summarized briefly.
+
+\begin{tabularx}{\textwidth}{@{}p{2.3cm}p{4.2cm}X@{}}
+\toprule
+\textbf{Module} & \textbf{Representative Endpoints} & \textbf{Short Description} \\
+\midrule
+Meta & \texttt{/meta/health} & Liveness and timestamp endpoint for health monitoring. \\
+Me & \texttt{/me}, \texttt{/me/notifications} & Current user profile update and notification read flow. \\
+Users & \texttt{/users}, \texttt{/users/\{userId\}} & Admin-oriented user listing, role/status updates, and detail lookup. \\
+Geo & \texttt{/geo/zones}, \texttt{/geo/geocode}, \texttt{/geo/distance} & Zone administration and routing/geocoding helper services. \\
+SMS & \texttt{/sms/send}, \texttt{/sms/templates}, \texttt{/sms/webhooks/delivery} & Messaging dispatch, template lifecycle, and delivery callback ingestion. \\
+Admin & \texttt{/admin/analytics/*} & KPI summaries and aggregated operational analytics. \\
+\bottomrule
+\end{tabularx}
+
+\vspace{6pt}
+\noindent These modules are integrated with core modules mainly through side
+effects (notification, geodata, analytics) rather than direct lifecycle control.
+
+% -------------------------------------------------------------
+\section{Error Handling, Status Codes, and Validation}
+% -------------------------------------------------------------
+
+\subsection{HTTP Status Code Strategy}
+
+\begin{tabularx}{\textwidth}{@{}p{1.8cm}X@{}}
+\toprule
+\textbf{Code} & \textbf{Meaning in This API} \\
+\midrule
+200 & Read/action success for non-creation operations. \\
+201 & Resource successfully created (order, account, proof, template, zone). \\
+400 & Validation or business-rule failure at request level. \\
+401 & Missing, expired, or invalid token for protected resources. \\
+403 & Authenticated but role/permission not sufficient. \\
+404 & Path resource not found or inaccessible in current scope. \\
+409 & Duplicate or conflict scenario (for example duplicate registration). \\
+429 & OTP throttling or other rate-limit controls. \\
+\bottomrule
+\end{tabularx}
+
+\subsection{Error Envelope Benefits}
+
+\begin{itemize}
+		\item \textbf{Frontend simplicity:} one generic error parser can power all pages.
+		\item \textbf{Field-level guidance:} \texttt{details[]} makes form validation precise.
+		\item \textbf{Monitoring quality:} stable \texttt{error.code} values are easy to aggregate.
+\end{itemize}
+
+% -------------------------------------------------------------
+\section{Operational and Security Considerations}
+% -------------------------------------------------------------
+
+\subsection{Idempotency and Retry Safety}
+
+Endpoints that can be retried by clients or gateways should accept
+\texttt{Idempotency-Key} and store request fingerprints. This avoids duplicate
+orders, duplicate payment sessions, and duplicate COD entries during network
+instability.
+
+\subsection{Webhook Hardening}
+
+For prepaid and SMS webhooks:
+\begin{itemize}
+		\item validate provider HMAC signatures,
+		\item whitelist provider IP ranges when possible,
+		\item persist raw payload for forensic audit,
+		\item always return deterministic acknowledgment payload.
+\end{itemize}
+
+\subsection{Location and PII Protection}
+
+\begin{itemize}
+		\item Public tracking endpoints return sanitized fields only.
+		\item Phone and sensitive contact data should remain masked in public responses.
+		\item Access to full location history is restricted to admin/dispatcher.
+\end{itemize}
+
+\subsection{Consistency and Observability}
+
+Operational recommendation:
+include a unique \texttt{requestId} in \texttt{meta} and correlate it across
+gateway logs, database events, and SMS/webhook traces.
+
+% -------------------------------------------------------------
+\section{Testing and Quality Assurance Strategy}
+% -------------------------------------------------------------
+
+A robust testing strategy is required to ensure correctness of stateful flows
+such as dispatch race handling, status transitions, OTP verification, and
+payment reconciliation.
+
+\subsection{Recommended Test Layers}
+
+\begin{tabularx}{\textwidth}{@{}p{2.5cm}p{4.8cm}X@{}}
+\toprule
+\textbf{Test Layer} & \textbf{Target} & \textbf{Example Cases} \\
+\midrule
+Unit & Service/business logic & Price computation, status transition guards, payment status mapping. \\
+Integration & API + database + auth & Role-bound endpoint access, order lifecycle progression, offer acceptance race. \\
+Contract & OpenAPI schema alignment & Required fields, enum restrictions, response envelope compliance. \\
+Security & Auth and abuse resistance & JWT tampering, replay attempts, OTP brute-force/rate-limit checks. \\
+\bottomrule
+\end{tabularx}
+
+\subsection{High-value Regression Cases}
+
+\begin{enumerate}
+		\item Registration rejects \texttt{ADMIN}/\texttt{DISPATCHER} role values.
+		\item Rider status endpoint rejects invalid state jumps.
+		\item Rider location endpoint ignores forged identity fields.
+		\item Offer acceptance cancels competing offers atomically.
+		\item COD payment state updates correctly for under/over collection.
+		\item Public tracking response never leaks direct phone numbers.
+\end{enumerate}
+
+% -------------------------------------------------------------
+\section{Conclusion}
+% -------------------------------------------------------------
+
+The API design provides strong coverage of parcel delivery operations with
+clear separation of concerns, role-aware access control, and a consistent
+response model. The most business-critical modules (Orders, Dispatch, Rider,
+Tracking, Payments, Verification) are sufficiently expressive for real-world
+delivery workflows, while secondary modules (Me, Users, Geo, SMS, Admin)
+support usability, governance, and analytics.
+
+The specification-level corrections applied in this revision improve security
+and logic consistency without changing the overall architecture:
+registration role hardening, rider status transition constraints, and secure
+identity handling for rider location ingestion.
+

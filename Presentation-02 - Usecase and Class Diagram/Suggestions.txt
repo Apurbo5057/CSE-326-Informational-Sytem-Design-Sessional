@@ -1,0 +1,7 @@
+accha madam 3 ta vul dhorsilo use case e: 
+1. login registration e verify dei nai.
+2. Process cod er jonno external ekta actor rakhte bolsilo ar driver er sathe relation deyar jonno bolsilo.
+3. notificaton er jonno o alada ekta service actor rakhte bolsilo.
+
+ar Class diagram e bolsilo :
+1. kichu classe e attribute kom cilo.
